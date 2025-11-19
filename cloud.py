@@ -7,8 +7,6 @@ from cloudinary import utils
 import base64
 import psycopg2
 from dotenv import load_dotenv
-from typing import Optional
-from pydantic import BaseModel
 import time
 from fastapi.encoders import jsonable_encoder
 
