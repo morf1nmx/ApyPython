@@ -10,9 +10,10 @@ from dotenv import load_dotenv
 from typing import Optional
 from pydantic import BaseModel
 import time
+from fastapi.encoders import jsonable_encoder
 
 # Cargar variables de entorno
-load_dotenv("credentials.env")  # Asegúrate de que este archivo exista con las claves
+load_dotenv("credentials.env") 
 
 app = FastAPI()
 
@@ -32,12 +33,7 @@ cloudinary.config(
     api_secret=os.getenv("CLOUDINARY_API_SECRET"),
 )
 
-# --- MODELOS Pydantic ---
-class VisitCreate(BaseModel):
-    name: str
-    comment: Optional[str] = None
-    image_url: Optional[str] = None
-    public_id: Optional[str] = None  # Ahora opcional, se recibe del form-data
+
 
 # Conexión a DB
 DATABASE_URL = os.getenv(
@@ -141,10 +137,18 @@ def list_visits():
         FROM visits
         ORDER BY created_at DESC;
     """
-
+    
     try:
         cur.execute(select_query)
-        visits = cur.fetchall()
+        rows = cur.fetchall()
+        # Obtener los nombres de las columnas
+        col_names = [desc[0] for desc in cur.description]
+        # Convertir cada fila (tuple) a dict usando los nombres de columnas
+        visits = [dict(zip(col_names, row)) for row in rows]
+
+        # Convertir a algo serializable JSON (por ejemplo, para las fechas)
+        visits = jsonable_encoder(visits)
+
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
     finally:
