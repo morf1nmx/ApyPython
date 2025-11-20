@@ -10,6 +10,7 @@ from dotenv import load_dotenv
 import time
 from fastapi.encoders import jsonable_encoder
 
+
 # Cargar variables de entorno
 load_dotenv("credentials.env") 
 
@@ -19,7 +20,7 @@ app = FastAPI()
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
-    allow_credentials=True,
+    allow_credentials=["*"],
     allow_methods=["*"],
     allow_headers=["*"],
 )
@@ -34,10 +35,7 @@ cloudinary.config(
 
 
 # Conexión a DB
-DATABASE_URL = os.getenv(
-    "DATABASE_URL",
-    "postgresql://neondb_owner:npg_IxGQ1nUAiBY8@ep-raspy-cake-ad01wc64-pooler.c-2.us-east-1.aws.neon.tech/neondb?sslmode=require&channel_binding=require"
-)
+DATABASE_URL = os.getenv("DATABASE_URL")
 
 def get_db_connection():
     return psycopg2.connect(DATABASE_URL)
