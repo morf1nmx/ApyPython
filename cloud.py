@@ -57,22 +57,25 @@ app = FastAPI()
 
 
 
+from fastapi import Request
+import httpx
+
 WORKER_URL = "https://gentle-breeze-d28f.jonasanchez1993.workers.dev/track"
 
 @app.middleware("http")
 async def track_middleware(request: Request, call_next):
-    endpoint = request.url.path
+    endpoint = request.url.path  # Ej: "/upload" o "/get_data"
 
-    # Evitar loops
-    if not endpoint.startswith("/internal"):
+    # Evitar tracking de docs o rutas internas
+    if endpoint not in ["/docs", "/openapi.json"] and not endpoint.startswith("/internal"):
         try:
             async with httpx.AsyncClient(timeout=1.0) as client:
                 await client.post(WORKER_URL, json={
-                    "tipo": "backend",
-                    "ruta": "http://localhost:8000/get_data"
+                    "tipo": "backend/",                      # prefijo profesional
+                    "ruta": endpoint.replace("/", "")        # "/upload" → "upload"
                 })
         except:
-            pass   # Nunca interrumpas tu backend si falla el tracking
+            pass  # Nunca rompe tu backend si Cloudflare falla
 
     response = await call_next(request)
     return response
