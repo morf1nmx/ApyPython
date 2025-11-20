@@ -1,128 +1,204 @@
 import os
-from fastapi import FastAPI, UploadFile, File, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+import time
+import base64
+from dotenv import load_dotenv
+
 import requests
+import psycopg2
 import cloudinary
 from cloudinary import utils
-import base64
-import psycopg2
-from dotenv import load_dotenv
-import time
+
+from fastapi import FastAPI, UploadFile, File, Form, HTTPException
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.encoders import jsonable_encoder
+from fastapi import Request
+import httpx
+
+# ============================
+#  CARGA VARIABLES DE ENTORNO
+# ============================
+load_dotenv("credentials.env")
+
+# ============================
+#  CONFIGURACIÓN CLOUDINARY
+# ============================
+CLOUD_NAME = os.getenv("CLOUDINARY_CLOUD_NAME")
+CLOUD_API_KEY = os.getenv("CLOUDINARY_API_KEY")
+CLOUD_API_SECRET = os.getenv("CLOUDINARY_API_SECRET")
+
+if not all([CLOUD_NAME, CLOUD_API_KEY, CLOUD_API_SECRET]):
+    raise RuntimeError("Faltan variables de entorno de Cloudinary")
+
+cloudinary.config(
+    cloud_name=CLOUD_NAME,
+    api_key=CLOUD_API_KEY,
+    api_secret=CLOUD_API_SECRET,
+)
+
+# ============================
+#  CONFIGURACIÓN DB (NEON)
+# ============================
+DATABASE_URL = os.getenv("DATABASE_URL")
+if not DATABASE_URL:
+    raise RuntimeError("Falta variable de entorno DATABASE_URL")
+
+def get_db_connection():
+    try:
+        return psycopg2.connect(DATABASE_URL)
+    except Exception as e:
+        # Error crítico de conexión a base de datos
+        raise HTTPException(status_code=500, detail=f"Database connection error: {str(e)}")
 
 
-# Cargar variables de entorno
-load_dotenv("credentials.env") 
-
+# ============================
+#  APP FASTAPI
+# ============================
 app = FastAPI()
 
-# Permitir CORS
+
+
+WORKER_URL = "https://gentle-breeze-d28f.jonasanchez1993.workers.dev/track"
+
+@app.middleware("http")
+async def track_middleware(request: Request, call_next):
+    endpoint = request.url.path
+
+    # Evitar loops
+    if not endpoint.startswith("/internal"):
+        try:
+            async with httpx.AsyncClient(timeout=1.0) as client:
+                await client.post(WORKER_URL, json={
+                    "tipo": "backend",
+                    "ruta": "http://localhost:8000/get_data"
+                })
+        except:
+            pass   # Nunca interrumpas tu backend si falla el tracking
+
+    response = await call_next(request)
+    return response
+
+
+# CORS: ajusta los orígenes permitidos según tu frontend
+# (por ejemplo: Vercel + localhost para desarrollo)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=["*"],
+    allow_origins=[
+        "https://infraestructure-cloud.vercel.app",
+        "http://localhost:3000",
+    ],
+    allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
-# Configurar Cloudinary con variables de entorno
-cloudinary.config(
-    cloud_name=os.getenv("CLOUDINARY_CLOUD_NAME"),
-    api_key=os.getenv("CLOUDINARY_API_KEY"),
-    api_secret=os.getenv("CLOUDINARY_API_SECRET"),
-)
-
-
-
-# Conexión a DB
-DATABASE_URL = os.getenv("DATABASE_URL")
-
-def get_db_connection():
-    return psycopg2.connect(DATABASE_URL)
-
+# ============================
+#  ENDPOINT: SUBIR IMAGEN Y GUARDAR VISITA
+# ============================
 @app.post("/upload")
 async def upload_image(
-    name: str = Form(...),  # Requerido en form-data
-    comment: str = Form(...),  # Requerido en form-data
-    public_id: str = Form(...),  # Requerido en form-data (el ID que envía el cliente)
-    photo: UploadFile = File(...)  # Archivo en form-data
+    name: str = Form(...),        # campo form-data
+    comment: str = Form(...),     # campo form-data
+    public_id: str = Form(...),   # ID que envía el cliente (no el de Cloudinary)
+    photo: UploadFile = File(...) # archivo en form-data
 ):
-    print("Petición recibida en /upload")
-    
-    # Validar que sea un archivo de imagen
-    if not photo.content_type.startswith("image/"):
+    print("📥 Petición recibida en /upload")
+
+    # Validar tipo de archivo
+    if not photo.content_type or not photo.content_type.startswith("image/"):
         raise HTTPException(status_code=400, detail="Only image files are allowed")
-    
-    if not photo.file:
+
+    # Leer archivo
+    file_bytes = await photo.read()
+    if not file_bytes:
         raise HTTPException(status_code=400, detail="No file provided")
-    
+
+    # ==========================
+    #  SUBIR A CLOUDINARY
+    # ==========================
+    folder = "visits"
+    timestamp = int(time.time())
+
     try:
-        folder = "visits"
-        timestamp = int(time.time())
-        
-        # Generar firma segura
+        # Firmar la petición
         signature = utils.api_sign_request(
             {"folder": folder, "timestamp": timestamp},
-            os.getenv("CLOUDINARY_API_SECRET")
+            CLOUD_API_SECRET
         )
-        
-        # Leer el archivo y convertir a base64
-        file_bytes = await photo.read()
+
+        # Convertir a base64
         content_type = photo.content_type
-        file_base64 = f"data:{content_type};base64,{base64.b64encode(file_bytes).decode('utf-8')}"
-        
-        # Subir a Cloudinary
+        file_base64 = (
+            f"data:{content_type};base64,"
+            f"{base64.b64encode(file_bytes).decode('utf-8')}"
+        )
+
+        # Petición a Cloudinary
         response = requests.post(
-            f"https://api.cloudinary.com/v1_1/{os.getenv('CLOUDINARY_CLOUD_NAME')}/image/upload",
+            f"https://api.cloudinary.com/v1_1/{CLOUD_NAME}/image/upload",
             data={
                 "file": file_base64,
                 "folder": folder,
-                "api_key": os.getenv("CLOUDINARY_API_KEY"),
+                "api_key": CLOUD_API_KEY,
                 "timestamp": timestamp,
                 "signature": signature,
-            }
+            },
+            timeout=30,
         )
-        
+
         if response.status_code != 200:
-            raise HTTPException(status_code=response.status_code, detail="Upload to Cloudinary failed")
-        
+            print("❌ Error al subir a Cloudinary:", response.text)
+            raise HTTPException(
+                status_code=response.status_code,
+                detail="Upload to Cloudinary failed",
+            )
+
         cloudinary_response = response.json()
-        uploaded_url = cloudinary_response.get("url")
-        # Nota: public_id se usa el del form-data, no el de Cloudinary
-        
-        # Insertar en PostgreSQL
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        insert_query = """
-            INSERT INTO visits (name, comment, image_url, public_id)
-            VALUES (%s, %s, %s, %s)
-            RETURNING id, name, comment, image_url, public_id, created_at;
-        """
-        
-        try:
-            cur.execute(insert_query, (name, comment, uploaded_url, public_id))
-            result = cur.fetchone()
-            conn.commit()
-        except Exception as e:
-            conn.rollback()
-            raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
-        finally:
-            cur.close()
-            conn.close()
-        
-        return {
-            "ok": True,
-            "cloudinary": cloudinary_response,
-            "database": result,  # Devuelve el registro insertado
-        }
-    
+        uploaded_url = cloudinary_response.get("url") or cloudinary_response.get("secure_url")
+
+        if not uploaded_url:
+            raise HTTPException(status_code=500, detail="Cloudinary did not return an image URL")
+
+    except HTTPException:
+        # ya se lanzó un error manejado
+        raise
     except Exception as error:
-        print("ERROR SUBIENDO ")
-        print(error)
-        raise HTTPException(status_code=500, detail=f"Upload failed: {str(error)}")
-    
-# --- ENDPOINT PARA LISTAR ---
+        print("❌ ERROR SUBIENDO A CLOUDINARY:", error)
+        raise HTTPException(status_code=500, detail=f"Upload to Cloudinary failed: {str(error)}")
+
+    # ==========================
+    #  INSERTAR EN POSTGRES
+    # ==========================
+    conn = get_db_connection()
+    cur = conn.cursor()
+
+    insert_query = """
+        INSERT INTO visits (name, comment, image_url, public_id)
+        VALUES (%s, %s, %s, %s)
+        RETURNING id, name, comment, image_url, public_id, created_at;
+    """
+
+    try:
+        cur.execute(insert_query, (name, comment, uploaded_url, public_id))
+        result = cur.fetchone()
+        conn.commit()
+    except Exception as e:
+        conn.rollback()
+        print("❌ ERROR EN DB:", e)
+        raise HTTPException(status_code=500, detail=f"Database error: {str(e)}")
+    finally:
+        cur.close()
+        conn.close()
+
+    return {
+        "ok": True,
+        "cloudinary": cloudinary_response,
+        "database": jsonable_encoder(result),
+    }
+
+
+# ============================
+#  ENDPOINT: LISTAR VISITAS
+# ============================
 @app.get("/get_data")
 def list_visits():
     conn = get_db_connection()
@@ -133,22 +209,26 @@ def list_visits():
         FROM visits
         ORDER BY created_at DESC;
     """
-    
+
     try:
         cur.execute(select_query)
         rows = cur.fetchall()
-        # Obtener los nombres de las columnas
+
+        # nombres de columnas
         col_names = [desc[0] for desc in cur.description]
-        # Convertir cada fila (tuple) a dict usando los nombres de columnas
+
+        # lista de dicts
         visits = [dict(zip(col_names, row)) for row in rows]
 
-        # Convertir a algo serializable JSON (por ejemplo, para las fechas)
+        # asegurar que todo sea serializable (fechas, etc.)
         visits = jsonable_encoder(visits)
 
     except Exception as e:
+        print("❌ ERROR LISTANDO VISITAS:", e)
         raise HTTPException(status_code=500, detail=str(e))
     finally:
         cur.close()
         conn.close()
 
+    # Mantengo el formato que ya usabas: lista directa
     return visits
